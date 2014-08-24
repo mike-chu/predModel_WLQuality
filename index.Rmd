@@ -1,22 +1,125 @@
 ---
 title: "Building prediction model for quality assessment of Weight Lifting Exercises"
 author: "Mike Chu"
-date: "August 11, 2014"
+date: "August 22, 2014"
 output: html_document
 ---
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+Introduction
+============
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+In this project, the goal is to use the data from accelerometers on the belt, forearm, arm and dumbell of 6 paritcipants and quantify how well they perform weight lifting exercises. We will evaluate the prediction model for this kind of quality assessment. 
 
-```{r}
-summary(cars)
+The data for this project come from this source: <http://groupware.les.inf.puc-rio.br/har>. From our analysis, we found using `random forest` decision algorithm best predicting the quality classe, giving us an impressive classification accuracy of 99%.
+
+Getting and cleaning the data
+=============================
+
+```{r gettingdata, echo=FALSE, results='hide', warning=FALSE}
+wleData <- read.csv('pml-training.csv',
+                    row.names=1,
+                    stringsAsFactors = FALSE)
+for (i in 7:158) {
+    wleData[,i] <- as.numeric(wleData[,i])
+}
+wleData$classe <- factor(wleData$classe)
+validation <- read.csv('pml-testing.csv',
+                       row.names=1,
+                       stringsAsFactors = FALSE)
+for (i in 7:158) {
+    validation[,i] <- as.numeric(validation[,i])
+}
 ```
 
-You can also embed plots, for example:
-
-```{r, echo=FALSE}
-plot(cars)
+As shown in the following exploratory plot, there are quite a few features which have >95% values missing in both the training and validation data. Hence it will not be any helpful to include these features in the model learning. We have decided to remove these features from the data sets as there are not sufficicent information to impute them usefully.
+```{r exploratory, echo=FALSE}
+plot(colSums(is.na(wleData))/nrow(wleData), col='black',
+     xlab='features', ylab='ratio of NAs')
+points(colSums(is.na(validation))/nrow(validation), col='red')
+legend(x=120, y=0.5,legend=c('training','validation'),col=c('black','red'), pch=1)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Also, we have removed the user names as well as the timestamp / window information from the data set because we want to evaluate the prediction models based on the accelerometer measurement data.
+```{r cleaningdata, echo=TRUE, results='hide'}
+wleData <- wleData[,colSums(is.na(wleData))<nrow(wleData)*0.95]
+wleData <- subset(wleData, select=c(-user_name,
+                                    -raw_timestamp_part_1, -raw_timestamp_part_2,
+                                    -cvtd_timestamp,-new_window,-num_window))
+validation <- validation[,names(subset(wleData, select=-classe))]
+```
+
+Cross validation setup
+======================
+
+We have split the training data sets and used 75% for the machine learning and the rest 25% as cross validation sets.
+```{r cv, echo=TRUE, results='hide'}
+suppressMessages(suppressWarnings(library(caret)))
+set.seed(1894)
+inTrain <- createDataPartition(y=wleData$classe,
+                               p=0.75, list=FALSE)
+training <- wleData[inTrain,]
+testing <- wleData[c(-inTrain),]
+```
+
+Prediction Model
+================
+
+### Support Vector Machine
+
+First, we have used support vector machine as classifier. We are using the radial basis as the kernel for SVM algorithm. The maching learning is taking all of the training data very efficiently in a short computation time and produced a decent classification accuracy of ~95.3%. The 95% confidence interval of the accuracy is between 94.7% and 95.9%.
+
+```{r svm, echo=TRUE, cache=TRUE}
+suppressMessages(suppressWarnings(library(e1071)))
+modFit1 <- svm(classe ~ ., data=training)
+pred1 <- predict(modFit1, testing)
+confusionMatrix(pred1, testing$classe)
+```
+
+### Random Forest
+
+Next, we have used random forest classification algorithm. The algorithm is an ensemble learning that constructs a multitude of decision trees and contains a bagging of forest and choose the outcome by majority vote. It is producing a very impressive classification accuracy of >99% but taking significant amount of computation time (~an hour with 4 core parallel)
+
+```{r rf, echo=TRUE, cache=TRUE}
+suppressMessages(suppressWarnings(library(randomForest)))
+suppressMessages(suppressWarnings(library(doMC)))
+registerDoMC(cores = 4)
+modFit2 <- train(classe ~ ., data=training, method='rf', importance=TRUE)
+pred2 <- predict(modFit2, testing)
+confusionMatrix(pred2, testing$classe)
+varImpPlot(modFit2$finalModel)
+```
+
+With the above variance importance plot, it is shown that the most important variables include {yaw, roll, pitch} of belt sensor and also magnetometer in dumbbell among others.
+
+### Random Forest with Principal Components (PCA)
+
+In an attempt to reduce the computation time of random forest, I have tried using PCA method as to reduce the dimensionality of the feature set. I have used a threshold of 99% to extract about 36 principal components which still retains about 99% of variance. We then feed these 36 PC to the random forest model training. Via this reduction, the machine learning is taking about half of time (30 minutes.) but also with a slight drop in classification accuracy to 98%.
+```{r pca, echo=TRUE, cache=TRUE}
+preProc <- preProcess(training[,-53], method="pca", thresh=0.99)
+trainPC <- predict(preProc,training[,-53])
+ncol(trainPC)
+modFit5 <- train(training$classe ~ ., data=trainPC, method='rf', importance=TRUE)
+testPC <- predict(preProc,testing[,-53])
+pred5 <- predict(modFit5, testPC)
+confusionMatrix(pred5, testing$classe)
+```
+
+Results
+================
+
+I have applied the random forest model (modFit2) with the split training data set and applied to the validation for prediction. I will expect the out-of-sample error to be low, similar as cross-validation accuracy. And with 20 validation data, I have got them all correct.
+```{r writefx, echo=FALSE, results='hide'}
+pml_write_files = function(x){
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0("problem_id_",i,".txt")
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+}
+```
+
+```{r result, echo=TRUE}
+suppressMessages(suppressWarnings(library(randomForest)))
+answers <- predict(modFit2, validation)
+pml_write_files(answers)
+```
